@@ -1,0 +1,537 @@
+// ==================== MAIN.TS ====================
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { ValidationPipe } from '@nestjs/common';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import * as cookieParser from 'cookie-parser';
+import { ConfigService } from '@nestjs/config';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalFilters(new HttpExceptionFilter(), new AllExceptionsFilter());
+  app.use(cookieParser());
+  app.enableCors({
+    origin: configService.get('CORS_ORIGIN') || '*',
+    credentials: true,
+  });
+
+  // Swagger Documentation
+  const config = new DocumentBuilder()
+    .setTitle('School Management API')
+    .setDescription('API for managing school operations')
+    .setVersion('1.0')
+    .addBearerAuth()
+    .build();
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api', app, document);
+
+  await app.listen(configService.get('PORT') || 5000);
+}
+bootstrap();
+
+// ==================== APP.MODULE.TS ====================
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { AuthModule } from './auth/auth.module';
+import { StudentsModule } from './students/students.module';
+import { FeesModule } from './fees/fees.module';
+import { ReportsModule } from './reports/reports.module';
+import { ReceiptsModule } from './receipts/receipts.module';
+import { SmsModule } from './sms/sms.module';
+import { CashbookModule } from './cashbook/cashbook.module';
+import { BulkImportModule } from './bulk-import/bulk-import.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    MongooseModule.forRoot(process.env.MONGODB_URI),
+    AuthModule,
+    StudentsModule,
+    FeesModule,
+    ReportsModule,
+    ReceiptsModule,
+    SmsModule,
+    CashbookModule,
+    BulkImportModule,
+  ],
+})
+export class AppModule {}
+
+// ==================== AUTH/AUTH.MODULE.TS ====================
+import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { AuthService } from './auth.service';
+import { AuthController } from './auth.controller';
+import { JwtStrategy } from './strategies/jwt.strategy';
+import { User, UserSchema } from './entities/user.entity';
+import { MongooseModule } from '@nestjs/mongoose';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
+    PassportModule,
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        secret: configService.get('JWT_SECRET'),
+        signOptions: { expiresIn: configService.get('JWT_EXPIRES_IN') || '1d' },
+      }),
+      inject: [ConfigService],
+    }),
+  ],
+  controllers: [AuthController],
+  providers: [AuthService, JwtStrategy],
+  exports: [AuthService],
+})
+export class AuthModule {}
+
+// ==================== AUTH/AUTH.SERVICE.TS ====================
+import { Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { User } from './entities/user.entity';
+import * as bcrypt from 'bcrypt';
+
+@Injectable()
+export class AuthService {
+  constructor(
+    @InjectModel(User.name) private userModel: Model<User>,
+    private jwtService: JwtService,
+  ) {}
+
+  async validateUser(username: string, pass: string): Promise<User | null> {
+    const user = await this.userModel.findOne({ username });
+    if (user && (await bcrypt.compare(pass, user.password))) {
+      return user;
+    }
+    return null;
+  }
+
+  async login(user: User) {
+    const payload = { username: user.username, sub: user._id, role: user.role };
+    return {
+      accessToken: this.jwtService.sign(payload),
+    };
+  }
+}
+
+// ==================== RECEIPTS/RECEIPTS.MODULE.TS ====================
+import { Module } from '@nestjs/common';
+import { ReceiptsService } from './receipts.service';
+import { ReceiptsController } from './receipts.controller';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Receipt, ReceiptSchema } from './entities/receipt.entity';
+import { Student, StudentSchema } from '../students/entities/student.entity';
+import { Fee, FeeSchema } from '../fees/entities/fee.entity';
+import { SmsModule } from '../sms/sms.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([
+      { name: Receipt.name, schema: ReceiptSchema },
+      { name: Student.name, schema: StudentSchema },
+      { name: Fee.name, schema: FeeSchema },
+    ]),
+    SmsModule,
+  ],
+  controllers: [ReceiptsController],
+  providers: [ReceiptsService],
+})
+export class ReceiptsModule {}
+
+// ==================== RECEIPTS/RECEIPTS.SERVICE.TS ====================
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Receipt } from './entities/receipt.entity';
+import { Student } from '../students/entities/student.entity';
+import { Fee } from '../fees/entities/fee.entity';
+import { PDFDocument, rgb } from 'pdf-lib';
+import * as fontkit from 'fontkit';
+import { SmsService } from '../sms/sms.service';
+
+@Injectable()
+export class ReceiptsService {
+  constructor(
+    @InjectModel(Receipt.name) private receiptModel: Model<Receipt>,
+    @InjectModel(Student.name) private studentModel: Model<Student>,
+    @InjectModel(Fee.name) private feeModel: Model<Fee>,
+    private smsService: SmsService,
+  ) {}
+
+  async create(createReceiptDto: any) {
+    const receiptNo = this.generateReceiptNumber();
+    const receipt = new this.receiptModel({ ...createReceiptDto, receiptNo });
+    return receipt.save();
+  }
+
+  async generatePdf(receiptId: string) {
+    const receipt = await this.receiptModel.findById(receiptId)
+      .populate('student')
+      .populate('fee')
+      .exec();
+
+    if (!receipt) {
+      throw new Error('Receipt not found');
+    }
+
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.registerFontkit(fontkit);
+    
+    // Embed fonts and create page
+    const page = pdfDoc.addPage([600, 800]);
+    const { width, height } = page.getSize();
+    
+    // Draw receipt content
+    page.drawText('SCHOOL RECEIPT', {
+      x: 50,
+      y: height - 50,
+      size: 24,
+      color: rgb(0, 0, 0),
+    });
+    
+    // Add more receipt details...
+    
+    return await pdfDoc.save();
+  }
+
+  async sendSmsNotification(receiptId: string, phoneNumber: string) {
+    const receipt = await this.receiptModel.findById(receiptId)
+      .populate('student')
+      .populate('fee')
+      .exec();
+
+    const message = `Payment of ${receipt.amount} received for ${receipt.student.name}. Receipt No: ${receipt.receiptNo}`;
+    return this.smsService.sendSms(phoneNumber, message);
+  }
+
+  async findAllByStudent(studentId: string) {
+    return this.receiptModel.find({ student: studentId })
+      .sort({ paymentDate: -1 })
+      .exec();
+  }
+
+  private generateReceiptNumber(): string {
+    const prefix = 'RCPT';
+    const year = new Date().getFullYear().toString().slice(-2);
+    const month = (new Date().getMonth() + 1).toString().padStart(2, '0');
+    const random = Math.floor(1000 + Math.random() * 9000);
+    return `${prefix}${year}${month}${random}`;
+  }
+}
+
+// ==================== SMS/SMS.SERVICE.TS ====================
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class SmsService {
+  constructor(private configService: ConfigService) {}
+
+  async sendSms(phoneNumber: string, message: string) {
+    // Implement your SMS gateway integration here
+    // This is a mock implementation
+    console.log(`Sending SMS to ${phoneNumber}: ${message}`);
+    return { success: true };
+  }
+}
+
+// ==================== CASHBOOK/CASHBOOK.MODULE.TS ====================
+import { Module } from '@nestjs/common';
+import { CashbookService } from './cashbook.service';
+import { CashbookController } from './cashbook.controller';
+import { MongooseModule } from '@nestjs/mongoose';
+import { CashbookEntry, CashbookEntrySchema } from './entities/cashbook.entity';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: CashbookEntry.name, schema: CashbookEntrySchema }]),
+  ],
+  controllers: [CashbookController],
+  providers: [CashbookService],
+})
+export class CashbookModule {}
+
+// ==================== CASHBOOK/CASHBOOK.SERVICE.TS ====================
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { CashbookEntry } from './entities/cashbook.entity';
+import { PDFDocument, rgb } from 'pdf-lib';
+
+@Injectable()
+export class CashbookService {
+  constructor(
+    @InjectModel(CashbookEntry.name) private cashbookModel: Model<CashbookEntry>,
+  ) {}
+
+  async create(createCashbookDto: any) {
+    const entry = new this.cashbookModel(createCashbookDto);
+    return entry.save();
+  }
+
+  async findAll() {
+    return this.cashbookModel.find().sort({ date: -1 }).exec();
+  }
+
+  async closeFinancialYear() {
+    // Generate reports
+    const report = await this.generateYearEndReport();
+    
+    // Archive current year data
+    await this.archiveCurrentYear();
+    
+    // Reset balances or carry forward as needed
+    return { success: true, report };
+  }
+
+  async generateReport() {
+    const entries = await this.findAll();
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([600, 800]);
+    
+    // Add report content
+    page.drawText('Cashbook Report', {
+      x: 50,
+      y: 750,
+      size: 24,
+      color: rgb(0, 0, 0),
+    });
+    
+    // Add more report content...
+    
+    return await pdfDoc.save();
+  }
+
+  private async generateYearEndReport() {
+    // Implementation for year-end report
+    return { pdf: Buffer.from(''), summary: {} };
+  }
+
+  private async archiveCurrentYear() {
+    // Implementation for archiving
+    return { success: true };
+  }
+}
+
+// ==================== BULK-IMPORT/BULK-IMPORT.MODULE.TS ====================
+import { Module } from '@nestjs/common';
+import { BulkImportService } from './bulk-import.service';
+import { BulkImportController } from './bulk-import.controller';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Student, StudentSchema } from '../students/entities/student.entity';
+import { Fee, FeeSchema } from '../fees/entities/fee.entity';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([
+      { name: Student.name, schema: StudentSchema },
+      { name: Fee.name, schema: FeeSchema },
+    ]),
+  ],
+  controllers: [BulkImportController],
+  providers: [BulkImportService],
+})
+export class BulkImportModule {}
+
+// ==================== BULK-IMPORT/BULK-IMPORT.SERVICE.TS ====================
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Student } from '../students/entities/student.entity';
+import { Fee } from '../fees/entities/fee.entity';
+import * as csv from 'csv-parser';
+import { Readable } from 'stream';
+
+@Injectable()
+export class BulkImportService {
+  constructor(
+    @InjectModel(Student.name) private studentModel: Model<Student>,
+    @InjectModel(Fee.name) private feeModel: Model<Fee>,
+  ) {}
+
+  async importStudents(csvData: string): Promise<any> {
+    const results = await this.parseCsv(csvData);
+    const students = results.map(row => ({
+      admissionNo: row.admissionNo,
+      name: row.name,
+      class: row.class,
+      gender: row.gender,
+      dob: new Date(row.dob),
+      parentName: row.parentName,
+      parentPhone: row.parentPhone,
+    }));
+    
+    return this.studentModel.insertMany(students);
+  }
+
+  async importFees(csvData: string): Promise<any> {
+    const results = await this.parseCsv(csvData);
+    const fees = await Promise.all(results.map(async row => {
+      const student = await this.studentModel.findOne({ admissionNo: row.studentAdmissionNo });
+      if (!student) throw new Error(`Student not found: ${row.studentAdmissionNo}`);
+      
+      return {
+        student: student._id,
+        amount: parseFloat(row.amount),
+        term: row.term,
+        year: parseInt(row.year),
+        dueDate: new Date(row.dueDate),
+      };
+    }));
+    
+    return this.feeModel.insertMany(fees);
+  }
+
+  private parseCsv(csvData: string): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+      const results: any[] = [];
+      const stream = Readable.from(csvData);
+      
+      stream
+        .pipe(csv())
+        .on('data', (data) => results.push(data))
+        .on('end', () => resolve(results))
+        .on('error', (error) => reject(error));
+    });
+  }
+}
+
+// ==================== COMMON/ENTITIES ====================
+
+// student.entity.ts
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class Student extends Document {
+  @Prop({ required: true, unique: true })
+  admissionNo: string;
+
+  @Prop({ required: true })
+  name: string;
+
+  @Prop({ required: true })
+  class: string;
+
+  @Prop({ required: true })
+  gender: string;
+
+  @Prop({ required: true })
+  dob: Date;
+
+  @Prop()
+  parentName: string;
+
+  @Prop()
+  parentPhone: string;
+}
+
+export const StudentSchema = SchemaFactory.createForClass(Student);
+
+// fee.entity.ts
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+import { Student } from './student.entity';
+
+@Schema({ timestamps: true })
+export class Fee extends Document {
+  @Prop({ type: Types.ObjectId, ref: Student.name, required: true })
+  student: Types.ObjectId;
+
+  @Prop({ required: true })
+  amount: number;
+
+  @Prop({ required: true })
+  term: string;
+
+  @Prop({ required: true })
+  year: number;
+
+  @Prop({ required: true })
+  dueDate: Date;
+
+  @Prop({ default: false })
+  isPaid: boolean;
+}
+
+export const FeeSchema = SchemaFactory.createForClass(Fee);
+
+// receipt.entity.ts
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+import { Student } from './student.entity';
+import { Fee } from './fee.entity';
+
+@Schema({ timestamps: true })
+export class Receipt extends Document {
+  @Prop({ required: true, unique: true })
+  receiptNo: string;
+
+  @Prop({ type: Types.ObjectId, ref: Student.name, required: true })
+  student: Types.ObjectId;
+
+  @Prop({ type: Types.ObjectId, ref: Fee.name, required: true })
+  fee: Types.ObjectId;
+
+  @Prop({ required: true })
+  amount: number;
+
+  @Prop({ required: true })
+  paymentMethod: string;
+
+  @Prop()
+  remarks: string;
+
+  @Prop({ default: Date.now })
+  paymentDate: Date;
+}
+
+export const ReceiptSchema = SchemaFactory.createForClass(Receipt);
+
+// cashbook.entity.ts
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class CashbookEntry extends Document {
+  @Prop({ required: true })
+  date: Date;
+
+  @Prop({ required: true, enum: ['Income', 'Expense'] })
+  type: string;
+
+  @Prop({ required: true })
+  category: string;
+
+  @Prop({ required: true })
+  amount: number;
+
+  @Prop()
+  description: string;
+
+  @Prop({ required: true })
+  paymentMethod: string;
+}
+
+export const CashbookEntrySchema = SchemaFactory.createForClass(CashbookEntry);
+
+// ==================== .ENV EXAMPLE ====================
+/*
+MONGODB_URI=mongodb://localhost:27017/school_management
+JWT_SECRET=your_strong_secret_here
+JWT_EXPIRES_IN=1d
+CORS_ORIGIN=http://localhost:3000
+PORT=5000
+SMS_API_KEY=your_sms_api_key
+SMS_SENDER_ID=YOUR_SCHOOL
+*/
