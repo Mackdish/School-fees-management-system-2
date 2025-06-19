@@ -1,0 +1,894 @@
+// ==================== MAIN.TSX ====================
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from 'react-query';
+import { ReactQueryDevtools } from 'react-query/devtools';
+import { BrowserRouter } from 'react-router-dom';
+import { ThemeProvider, createTheme } from '@mui/material/styles';
+import CssBaseline from '@mui/material/CssBaseline';
+import App from './App';
+import { AuthProvider } from './contexts/AuthContext';
+
+const theme = createTheme({
+  palette: {
+    primary: {
+      main: '#1976d2',
+    },
+    secondary: {
+      main: '#dc004e',
+    },
+  },
+});
+
+const queryClient = new QueryClient();
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <BrowserRouter>
+          <AuthProvider>
+            <App />
+            <ReactQueryDevtools initialIsOpen={false} />
+          </AuthProvider>
+        </BrowserRouter>
+      </ThemeProvider>
+    </QueryClientProvider>
+  </React.StrictMode>
+);
+
+// ==================== APP.TSX ====================
+import { Box } from '@mui/material';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import Navbar from './components/Layout/Navbar';
+import Sidebar from './components/Layout/Sidebar';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
+import Students from './pages/Students';
+import Fees from './pages/Fees';
+import Reports from './pages/Reports';
+import Receipts from './pages/Receipts';
+import BulkImport from './pages/BulkImport';
+import Cashbook from './pages/Cashbook';
+import { useAuth } from './hooks/useAuth';
+
+function ProtectedRoute({ children }: { children: JSX.Element }) {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return <div>Loading...</div>;
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return children;
+}
+
+function App() {
+  const { isAuthenticated } = useAuth();
+
+  return (
+    <Box sx={{ display: 'flex' }}>
+      {isAuthenticated && <Navbar />}
+      {isAuthenticated && <Sidebar />}
+      <Box component="main" sx={{ flexGrow: 1, p: 3, mt: 8 }}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+          <Route path="/students" element={<ProtectedRoute><Students /></ProtectedRoute>} />
+          <Route path="/fees" element={<ProtectedRoute><Fees /></ProtectedRoute>} />
+          <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
+          <Route path="/receipts" element={<ProtectedRoute><Receipts /></ProtectedRoute>} />
+          <Route path="/bulk-import" element={<ProtectedRoute><BulkImport /></ProtectedRoute>} />
+          <Route path="/cashbook" element={<ProtectedRoute><Cashbook /></ProtectedRoute>} />
+        </Routes>
+      </Box>
+    </Box>
+  );
+}
+
+export default App;
+
+// ==================== CONTEXTS/AUTHCONTEXT.TSX ====================
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { login as apiLogin, getProfile } from '../api/auth';
+
+interface AuthContextType {
+  isAuthenticated: boolean;
+  user: any;
+  login: (username: string, password: string) => Promise<void>;
+  logout: () => void;
+  loading: boolean;
+}
+
+const AuthContext = createContext<AuthContextType>(null!);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const initializeAuth = async () => {
+      const token = localStorage.getItem('accessToken');
+      if (token) {
+        try {
+          const profile = await getProfile();
+          setUser(profile);
+        } catch (error) {
+          localStorage.removeItem('accessToken');
+        }
+      }
+      setLoading(false);
+    };
+    initializeAuth();
+  }, []);
+
+  const login = async (username: string, password: string) => {
+    const { accessToken } = await apiLogin({ username, password });
+    localStorage.setItem('accessToken', accessToken);
+    const profile = await getProfile();
+    setUser(profile);
+  };
+
+  const logout = () => {
+    localStorage.removeItem('accessToken');
+    setUser(null);
+  };
+
+  const value = {
+    isAuthenticated: !!user,
+    user,
+    login,
+    logout,
+    loading,
+  };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth() {
+  return useContext(AuthContext);
+}
+
+// ==================== PAGES/RECEIPTS.TSX ====================
+import { useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { useQuery } from 'react-query';
+import { getStudentReceipts, sendSmsNotification, getReceiptPdf } from '../api/receipts';
+import { Box, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, Typography, Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem } from '@mui/material';
+import { Download, Send } from '@mui/icons-material';
+
+export default function Receipts() {
+  const { studentId } = useParams();
+  const { data: receipts, isLoading } = useQuery(['receipts', studentId], () => getStudentReceipts(studentId!));
+  const [smsDialogOpen, setSmsDialogOpen] = useState(false);
+  const [selectedReceipt, setSelectedReceipt] = useState<any>(null);
+  const [phoneNumber, setPhoneNumber] = useState('');
+
+  const downloadReceipt = async (receiptId: string) => {
+    const pdfBlob = await getReceiptPdf(receiptId);
+    const url = window.URL.createObjectURL(new Blob([pdfBlob]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `receipt-${receiptId}.pdf`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const handleSendSms = async () => {
+    if (selectedReceipt && phoneNumber) {
+      await sendSmsNotification(selectedReceipt._id, phoneNumber);
+      setSmsDialogOpen(false);
+    }
+  };
+
+  if (isLoading) return <div>Loading...</div>;
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Payment Receipts
+      </Typography>
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Receipt No</TableCell>
+              <TableCell>Date</TableCell>
+              <TableCell>Amount</TableCell>
+              <TableCell>Payment Method</TableCell>
+              <TableCell>Actions</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {receipts?.map((receipt: any) => (
+              <TableRow key={receipt._id}>
+                <TableCell>{receipt.receiptNo}</TableCell>
+                <TableCell>{new Date(receipt.paymentDate).toLocaleDateString()}</TableCell>
+                <TableCell>{receipt.amount.toFixed(2)}</TableCell>
+                <TableCell>{receipt.paymentMethod}</TableCell>
+                <TableCell>
+                  <Button
+                    variant="outlined"
+                    startIcon={<Download />}
+                    onClick={() => downloadReceipt(receipt._id)}
+                    sx={{ mr: 1 }}
+                  >
+                    Download
+                  </Button>
+                  {(receipt.paymentMethod === 'Mpesa' || receipt.paymentMethod === 'Bank Transfer') && (
+                    <Button
+                      variant="contained"
+                      startIcon={<Send />}
+                      onClick={() => {
+                        setSelectedReceipt(receipt);
+                        setSmsDialogOpen(true);
+                      }}
+                    >
+                      Send SMS
+                    </Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      <Dialog open={smsDialogOpen} onClose={() => setSmsDialogOpen(false)}>
+        <DialogTitle>Send SMS Notification</DialogTitle>
+        <DialogContent>
+          <TextField
+            label="Phone Number"
+            fullWidth
+            margin="normal"
+            value={phoneNumber}
+            onChange={(e) => setPhoneNumber(e.target.value)}
+            placeholder="e.g., 254712345678"
+          />
+          <Typography variant="body2" sx={{ mt: 2 }}>
+            A receipt notification will be sent to this number for payment of {selectedReceipt?.amount} via {selectedReceipt?.paymentMethod}.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSmsDialogOpen(false)}>Cancel</Button>
+          <Button onClick={handleSendSms} variant="contained">Send</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+}
+
+// ==================== PAGES/BULKIMPORT.TSX ====================
+import { useState } from 'react';
+import { useMutation } from 'react-query';
+import { Box, Button, Typography, Paper, Tabs, Tab, Card, CardContent } from '@mui/material';
+import { Upload as UploadIcon } from '@mui/icons-material';
+import { bulkImportStudents, bulkImportFees } from '../api/bulkImport';
+import Papa from 'papaparse';
+
+function BulkImport() {
+  const [activeTab, setActiveTab] = useState(0);
+  const [file, setFile] = useState<File | null>(null);
+  const [previewData, setPreviewData] = useState<any[]>([]);
+
+  const studentsMutation = useMutation(bulkImportStudents);
+  const feesMutation = useMutation(bulkImportFees);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files[0]) {
+      const uploadedFile = files[0];
+      setFile(uploadedFile);
+
+      Papa.parse(uploadedFile, {
+        header: true,
+        complete: (results) => {
+          setPreviewData(results.data.slice(0, 5));
+        },
+      });
+    }
+  };
+
+  const handleSubmit = () => {
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const csvData = e.target?.result as string;
+      if (activeTab === 0) {
+        await studentsMutation.mutateAsync(csvData);
+      } else {
+        await feesMutation.mutateAsync(csvData);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Bulk Import Data
+      </Typography>
+      
+      <Paper sx={{ mb: 3 }}>
+        <Tabs value={activeTab} onChange={(_, newValue) => setActiveTab(newValue)}>
+          <Tab label="Import Students" />
+          <Tab label="Import Fees" />
+        </Tabs>
+      </Paper>
+
+      <Card>
+        <CardContent>
+          <Typography variant="h6" gutterBottom>
+            {activeTab === 0 ? 'Student Import' : 'Fee Import'}
+          </Typography>
+          
+          <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+            <Button
+              variant="contained"
+              component="label"
+              startIcon={<UploadIcon />}
+              sx={{ mr: 2 }}
+            >
+              Upload CSV
+              <input
+                type="file"
+                hidden
+                accept=".csv"
+                onChange={handleFileUpload}
+              />
+            </Button>
+            
+            {file && (
+              <Typography variant="body1">
+                Selected: {file.name}
+              </Typography>
+            )}
+          </Box>
+
+          {previewData.length > 0 && (
+            <>
+              <Typography variant="subtitle1" gutterBottom>
+                Preview (first 5 records):
+              </Typography>
+              <Box sx={{ maxHeight: 300, overflow: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      {Object.keys(previewData[0]).map((key) => (
+                        <th key={key} style={{ border: '1px solid #ddd', padding: '8px', textAlign: 'left' }}>
+                          {key}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewData.map((row, i) => (
+                      <tr key={i}>
+                        {Object.values(row).map((value: any, j) => (
+                          <td key={j} style={{ border: '1px solid #ddd', padding: '8px' }}>
+                            {value}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+            </>
+          )}
+
+          <Box sx={{ mt: 3 }}>
+            <Button
+              variant="contained"
+              onClick={handleSubmit}
+              disabled={!file || studentsMutation.isLoading || feesMutation.isLoading}
+            >
+              {studentsMutation.isLoading || feesMutation.isLoading ? 'Importing...' : 'Start Import'}
+            </Button>
+          </Box>
+
+          {(studentsMutation.isSuccess || feesMutation.isSuccess) && (
+            <Typography color="success.main" sx={{ mt: 2 }}>
+              Import completed successfully!
+            </Typography>
+          )}
+
+          {(studentsMutation.error || feesMutation.error) && (
+            <Typography color="error" sx={{ mt: 2 }}>
+              Error during import: {studentsMutation.error?.message || feesMutation.error?.message}
+            </Typography>
+          )}
+        </CardContent>
+      </Card>
+
+      <Box sx={{ mt: 4 }}>
+        <Typography variant="h6" gutterBottom>
+          CSV Format Requirements
+        </Typography>
+        {activeTab === 0 ? (
+          <>
+            <Typography variant="body1">
+              Student CSV should include these columns: <code>admissionNo, name, class, gender, dob, parentName, parentPhone</code>
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Example:
+            </Typography>
+            <pre style={{ backgroundColor: '#f5f5f5', padding: '10px', borderRadius: '4px' }}>
+              admissionNo,name,class,gender,dob,parentName,parentPhone\n
+              2023001,John Doe,Grade 10,Male,2005-03-15,James Doe,254712345678\n
+              2023002,Jane Smith,Grade 9,Female,2006-05-20,Mary Smith,254798765432
+            </pre>
+          </>
+        ) : (
+          <>
+            <Typography variant="body1">
+              Fees CSV should include these columns: <code>studentAdmissionNo, amount, term, year, dueDate</code>
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Example:
+            </Typography>
+            <pre style={{ backgroundColor: '#f5f5f5', padding: '10px', borderRadius: '4px' }}>
+              studentAdmissionNo,amount,term,year,dueDate\n
+              2023001,15000,Term 1,2023,2023-02-15\n
+              2023002,12000,Term 1,2023,2023-02-15
+            </pre>
+          </>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+// ==================== PAGES/CASHBOOK.TSX ====================
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation } from 'react-query';
+import { 
+  Box, Typography, Button, Table, TableBody, TableCell, 
+  TableContainer, TableHead, TableRow, Paper, Dialog, 
+  DialogTitle, DialogContent, DialogActions, TextField, 
+  MenuItem, Select, FormControl, InputLabel, Alert, 
+  CircularProgress, Card, CardContent, Grid
+} from '@mui/material';
+import { Add, Update, Download } from '@mui/icons-material';
+import { 
+  getCashbookEntries, 
+  addCashbookEntry, 
+  closeFinancialYear,
+  downloadCashbookReport 
+} from '../api/cashbook';
+import { format } from 'date-fns';
+
+export default function Cashbook() {
+  const [openDialog, setOpenDialog] = useState(false);
+  const [newEntry, setNewEntry] = useState({
+    date: format(new Date(), 'yyyy-MM-dd'),
+    type: 'Income',
+    category: 'Fees',
+    amount: '',
+    description: '',
+    paymentMethod: 'Cash'
+  });
+  const [financialYearAlert, setFinancialYearAlert] = useState(false);
+  const [yearEndDialog, setYearEndDialog] = useState(false);
+
+  const { data: entries, isLoading, refetch } = useQuery('cashbook', getCashbookEntries);
+  const addEntryMutation = useMutation(addCashbookEntry, {
+    onSuccess: () => refetch()
+  });
+  const closeYearMutation = useMutation(closeFinancialYear);
+
+  useEffect(() => {
+    // Check if financial year needs updating
+    const currentYear = new Date().getFullYear();
+    const lastEntryYear = entries?.[0]?.date?.split('-')[0];
+    if (lastEntryYear && parseInt(lastEntryYear) < currentYear) {
+      setFinancialYearAlert(true);
+    }
+  }, [entries]);
+
+  const handleAddEntry = () => {
+    addEntryMutation.mutate(newEntry);
+    setOpenDialog(false);
+    setNewEntry({
+      date: format(new Date(), 'yyyy-MM-dd'),
+      type: 'Income',
+      category: 'Fees',
+      amount: '',
+      description: '',
+      paymentMethod: 'Cash'
+    });
+  };
+
+  const handleCloseYear = () => {
+    closeYearMutation.mutate();
+    setYearEndDialog(false);
+    setFinancialYearAlert(false);
+  };
+
+  const calculateTotals = () => {
+    if (!entries) return { income: 0, expense: 0, balance: 0 };
+    
+    const income = entries
+      .filter(e => e.type === 'Income')
+      .reduce((sum, entry) => sum + parseFloat(entry.amount), 0);
+      
+    const expense = entries
+      .filter(e => e.type === 'Expense')
+      .reduce((sum, entry) => sum + parseFloat(entry.amount), 0);
+      
+    return { income, expense, balance: income - expense };
+  };
+
+  const totals = calculateTotals();
+
+  const downloadReport = async () => {
+    const pdfBlob = await downloadCashbookReport();
+    const url = window.URL.createObjectURL(new Blob([pdfBlob]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `cashbook-report-${new Date().toISOString().split('T')[0]}.pdf`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+        <Typography variant="h4">Cashbook</Typography>
+        <Box>
+          <Button 
+            variant="contained" 
+            startIcon={<Download />} 
+            onClick={downloadReport}
+            sx={{ mr: 2 }}
+          >
+            Download Report
+          </Button>
+          <Button 
+            variant="contained" 
+            startIcon={<Add />} 
+            onClick={() => setOpenDialog(true)}
+          >
+            Add Entry
+          </Button>
+        </Box>
+      </Box>
+
+      {financialYearAlert && (
+        <Alert 
+          severity="warning" 
+          onClose={() => setFinancialYearAlert(false)}
+          action={
+            <Button 
+              color="inherit" 
+              size="small"
+              startIcon={<Update />}
+              onClick={() => setYearEndDialog(true)}
+            >
+              Update Financial Year
+            </Button>
+          }
+          sx={{ mb: 3 }}
+        >
+          The current financial year has ended. Please close the books and start a new financial year.
+        </Alert>
+      )}
+
+      <Grid container spacing={3} sx={{ mb: 3 }}>
+        <Grid item xs={12} md={4}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" color="text.secondary">
+                Total Income
+              </Typography>
+              <Typography variant="h4">
+                {totals.income.toLocaleString()}
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} md={4}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" color="text.secondary">
+                Total Expenses
+              </Typography>
+              <Typography variant="h4">
+                {totals.expense.toLocaleString()}
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} md={4}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" color="text.secondary">
+                Current Balance
+              </Typography>
+              <Typography 
+                variant="h4"
+                color={totals.balance >= 0 ? 'success.main' : 'error.main'}
+              >
+                {totals.balance.toLocaleString()}
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Date</TableCell>
+              <TableCell>Type</TableCell>
+              <TableCell>Category</TableCell>
+              <TableCell>Description</TableCell>
+              <TableCell>Payment Method</TableCell>
+              <TableCell align="right">Amount</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {isLoading ? (
+              <TableRow>
+                <TableCell colSpan={6} align="center">
+                  <CircularProgress />
+                </TableCell>
+              </TableRow>
+            ) : (
+              entries?.map((entry: any) => (
+                <TableRow key={entry._id}>
+                  <TableCell>{entry.date}</TableCell>
+                  <TableCell>{entry.type}</TableCell>
+                  <TableCell>{entry.category}</TableCell>
+                  <TableCell>{entry.description}</TableCell>
+                  <TableCell>{entry.paymentMethod}</TableCell>
+                  <TableCell 
+                    align="right"
+                    sx={{ 
+                      color: entry.type === 'Income' ? 'success.main' : 'error.main',
+                      fontWeight: 'bold'
+                    }}
+                  >
+                    {entry.type === 'Income' ? '+' : '-'}{parseFloat(entry.amount).toLocaleString()}
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      <Dialog open={openDialog} onClose={() => setOpenDialog(false)}>
+        <DialogTitle>Add Cashbook Entry</DialogTitle>
+        <DialogContent>
+          <TextField
+            label="Date"
+            type="date"
+            fullWidth
+            margin="normal"
+            InputLabelProps={{ shrink: true }}
+            value={newEntry.date}
+            onChange={(e) => setNewEntry({...newEntry, date: e.target.value})}
+          />
+          <FormControl fullWidth margin="normal">
+            <InputLabel>Type</InputLabel>
+            <Select
+              value={newEntry.type}
+              label="Type"
+              onChange={(e) => setNewEntry({...newEntry, type: e.target.value})}
+            >
+              <MenuItem value="Income">Income</MenuItem>
+              <MenuItem value="Expense">Expense</MenuItem>
+            </Select>
+          </FormControl>
+          <FormControl fullWidth margin="normal">
+            <InputLabel>Category</InputLabel>
+            <Select
+              value={newEntry.category}
+              label="Category"
+              onChange={(e) => setNewEntry({...newEntry, category: e.target.value})}
+            >
+              <MenuItem value="Fees">Fees</MenuItem>
+              <MenuItem value="Salaries">Salaries</MenuItem>
+              <MenuItem value="Supplies">Supplies</MenuItem>
+              <MenuItem value="Maintenance">Maintenance</MenuItem>
+              <MenuItem value="Other">Other</MenuItem>
+            </Select>
+          </FormControl>
+          <TextField
+            label="Description"
+            fullWidth
+            margin="normal"
+            value={newEntry.description}
+            onChange={(e) => setNewEntry({...newEntry, description: e.target.value})}
+          />
+          <FormControl fullWidth margin="normal">
+            <InputLabel>Payment Method</InputLabel>
+            <Select
+              value={newEntry.paymentMethod}
+              label="Payment Method"
+              onChange={(e) => setNewEntry({...newEntry, paymentMethod: e.target.value})}
+            >
+              <MenuItem value="Cash">Cash</MenuItem>
+              <MenuItem value="Cheque">Cheque</MenuItem>
+              <MenuItem value="Mpesa">Mpesa</MenuItem>
+              <MenuItem value="Bank Transfer">Bank Transfer</MenuItem>
+            </Select>
+          </FormControl>
+          <TextField
+            label="Amount"
+            type="number"
+            fullWidth
+            margin="normal"
+            value={newEntry.amount}
+            onChange={(e) => setNewEntry({...newEntry, amount: e.target.value})}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenDialog(false)}>Cancel</Button>
+          <Button 
+            onClick={handleAddEntry} 
+            variant="contained"
+            disabled={!newEntry.amount || addEntryMutation.isLoading}
+          >
+            {addEntryMutation.isLoading ? <CircularProgress size={24} /> : 'Add Entry'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={yearEndDialog} onClose={() => setYearEndDialog(false)}>
+        <DialogTitle>Close Financial Year</DialogTitle>
+        <DialogContent>
+          <Typography variant="body1" gutterBottom>
+            Closing the financial year will:
+          </Typography>
+          <ul>
+            <li>Generate final financial reports</li>
+            <li>Archive all current transactions</li>
+            <li>Reset balances for the new financial year</li>
+            <li>Create opening balances based on current assets/liabilities</li>
+          </ul>
+          <Typography variant="body1" sx={{ mt: 2 }}>
+            This action cannot be undone. Are you sure you want to proceed?
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setYearEndDialog(false)}>Cancel</Button>
+          <Button 
+            onClick={handleCloseYear} 
+            variant="contained"
+            color="warning"
+            disabled={closeYearMutation.isLoading}
+          >
+            {closeYearMutation.isLoading ? <CircularProgress size={24} /> : 'Close Financial Year'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+}
+
+// ==================== COMPONENTS/LAYOUT/SIDEBAR.TSX ====================
+import { Drawer, List, ListItem, ListItemIcon, ListItemText, Toolbar } from '@mui/material';
+import { Link } from 'react-router-dom';
+import {
+  Dashboard as DashboardIcon,
+  People as PeopleIcon,
+  Payment as PaymentIcon,
+  Report as ReportIcon,
+  Receipt as ReceiptIcon,
+  ImportExport as ImportExportIcon,
+  AccountBalance as AccountBalanceIcon,
+} from '@mui/icons-material';
+
+const menuItems = [
+  { text: 'Dashboard', icon: <DashboardIcon />, path: '/' },
+  { text: 'Students', icon: <PeopleIcon />, path: '/students' },
+  { text: 'Fees', icon: <PaymentIcon />, path: '/fees' },
+  { text: 'Receipts', icon: <ReceiptIcon />, path: '/receipts' },
+  { text: 'Cashbook', icon: <AccountBalanceIcon />, path: '/cashbook' },
+  { text: 'Reports', icon: <ReportIcon />, path: '/reports' },
+  { text: 'Bulk Import', icon: <ImportExportIcon />, path: '/bulk-import' },
+];
+
+export default function Sidebar() {
+  return (
+    <Drawer
+      variant="permanent"
+      sx={{
+        width: 240,
+        flexShrink: 0,
+        '& .MuiDrawer-paper': { width: 240, boxSizing: 'border-box' },
+      }}
+    >
+      <Toolbar />
+      <List>
+        {menuItems.map((item) => (
+          <ListItem button key={item.text} component={Link} to={item.path}>
+            <ListItemIcon>{item.icon}</ListItemIcon>
+            <ListItemText primary={item.text} />
+          </ListItem>
+        ))}
+      </List>
+    </Drawer>
+  );
+}
+
+// ==================== API/RECEIPTS.TS ====================
+import api from './axios';
+
+export const getStudentReceipts = async (studentId: string) => {
+  const response = await api.get(`/receipts/student/${studentId}`);
+  return response.data;
+};
+
+export const getReceiptPdf = async (id: string) => {
+  const response = await api.get(`/receipts/${id}/pdf`, {
+    responseType: 'blob',
+  });
+  return response.data;
+};
+
+export const sendSmsNotification = async (receiptId: string, phoneNumber: string) => {
+  const response = await api.post('/sms/send-receipt', {
+    receiptId,
+    phoneNumber,
+  });
+  return response.data;
+};
+
+// ==================== API/BULKIMPORT.TS ====================
+import api from './axios';
+
+export const bulkImportStudents = async (csvData: string) => {
+  const response = await api.post('/students/import', { csvData });
+  return response.data;
+};
+
+export const bulkImportFees = async (csvData: string) => {
+  const response = await api.post('/fees/import', { csvData });
+  return response.data;
+};
+
+// ==================== API/CASHBOOK.TS ====================
+import api from './axios';
+
+export interface CashbookEntry {
+  date: string;
+  type: 'Income' | 'Expense';
+  category: string;
+  amount: number;
+  description: string;
+  paymentMethod: string;
+}
+
+export const getCashbookEntries = async () => {
+  const response = await api.get('/cashbook');
+  return response.data;
+};
+
+export const addCashbookEntry = async (entry: CashbookEntry) => {
+  const response = await api.post('/cashbook', entry);
+  return response.data;
+};
+
+export const closeFinancialYear = async () => {
+  const response = await api.post('/cashbook/close-year');
+  return response.data;
+};
+
+export const downloadCashbookReport = async () => {
+  const response = await api.get('/cashbook/report', {
+    responseType: 'blob',
+  });
+  return response.data;
+};
+
+// ==================== HOOKS/USEAUTH.TS ====================
+import { useContext } from 'react';
+import { AuthContext } from '../contexts/AuthContext';
+
+export function useAuth() {
+  return useContext(AuthContext);
+}
